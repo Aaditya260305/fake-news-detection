@@ -1,0 +1,127 @@
+seed: 42
+
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  kb_cache: data/kb
+  reports: reports
+  figures: reports/figures
+  artifacts: artifacts
+  glove: data/embeddings/glove.6B.100d.txt
+
+dataset:
+  primary: real_or_fake
+  secondary: fake_news_detection
+  real_or_fake:
+    csv: data/raw/real_or_fake/fake_or_real_news.csv
+    text_col: text
+    label_col: label
+    pos_label: FAKE
+  fake_news_detection:
+    csv: data/raw/fake_news_detection/data.csv
+    text_col: Body
+    label_col: Label
+    pos_label: 0   # 0 == fake in the jruvika dataset
+  split:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+preprocessing:
+  spacy_model: en_core_web_sm
+  max_sentences: 40
+  max_tokens_per_sentence: 64
+  fasttextrank_window: 4
+  fasttextrank_topk: 15
+  augment:
+    synonym_replace_prob: 0.1
+    keep_topic_words: true
+    coverage_threshold: 0.6
+    self_service_passes: 0     # set to 1 to enable a second-pass augmentation
+
+entity_linking:
+  use_spacy_ner: true
+  spacy_ner_model: en_core_web_sm
+  wikidata_endpoint: https://www.wikidata.org/w/api.php
+  # Wikidata's UA policy asks for a contact URL or e-mail. Replace
+  # the placeholder below with your own before high-volume use.
+  wikidata_user_agent: "EKNet-Reimpl/1.0 (https://github.com/yourname/eknet; educational)"
+  max_entities_per_article: 10
+  top_relations:
+    - P31    # instance_of
+    - P279   # subclass_of
+    - P17    # country
+    - P569   # date_of_birth
+    - P570   # date_of_death
+    - P27    # country_of_citizenship
+    - P19    # place_of_birth
+    - P106   # occupation
+    - P159   # headquarters_location
+
+ontology:
+  num_dimensions: 4
+  top_level_types:
+    - PERSON
+    - ORG
+    - GPE
+    - LOC
+    - EVENT
+    - WORK_OF_ART
+    - DATE
+    - MONEY
+    - PRODUCT
+    - NORP
+    - FAC
+    - LAW
+
+kg:
+  embedding_dim: 64
+  transe_epochs: 30
+  transe_batch_size: 256
+  membership_loss_weight: 0.5
+  attention_pool: true
+
+text_encoder:
+  # type: one of {glove_tfidf, minilm}
+  #   glove_tfidf  - paper-faithful, fast, lower F1 (~87% on Real-or-Fake)
+  #   minilm       - SentenceTransformers MiniLM-L6-v2, +5-8 F1 on news,
+  #                  requires `pip install sentence-transformers`
+  type: glove_tfidf
+  glove_dim: 100
+  minilm_model: sentence-transformers/all-MiniLM-L6-v2
+  minilm_batch_size: 32
+
+model:
+  mode: both          # one of: text_only, ontology_only, both
+  hidden_dims: [128, 64]
+  dropout: 0.3
+  weight_decay: 1.0e-5
+
+training:
+  lr: 1.0e-4
+  batch_size: 32
+  epochs: 30
+  early_stopping_patience: 5
+  device: cpu
+
+baselines:
+  enabled:
+    - fasttext
+    - textrnn
+    - textrcnn
+    - transformer_small
+  hidden_dim: 64
+  embedding_dim: 100
+  epochs: 1
+  batch_size: 32
+  # CPU-friendly defaults: shorter sequences and full-core threading.
+  # Each ~2x speed-up of an LSTM/Transformer epoch on CPU.
+  max_len: 256
+  num_threads: 0   # 0 = use all cores; otherwise an explicit count
+
+comment_generator:
+  top_keywords: 3
+  rouge_reference_field: title   # use article title as proxy reference
+
+logging:
+  level: INFO

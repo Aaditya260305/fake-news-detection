@@ -1,0 +1,65 @@
+# Core scientific stack
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+scipy==1.13.1
+
+# NLP
+spacy==3.7.5
+nltk==3.8.1
+gensim==4.3.3
+summa==1.2.0
+rouge-score==0.1.2
+
+# Deep learning (CPU)
+torch==2.3.1
+# pykeen pulls torch + class-resolver + others.
+# The two pins below are NOT optional for pykeen==1.10.2 on Python 3.12:
+#   - setuptools<70    -> still ships `pkg_resources`, which pykeen
+#                         imports at load time.
+#   - class-resolver<0.5 -> still uses the single-parameter
+#                         FunctionResolver[T] signature pykeen expects.
+# Removing either of these pins breaks `import pykeen`.
+setuptools<70
+class-resolver<0.5
+pykeen==1.10.2
+
+# Lightweight classifiers / baselines
+# fasttext can be installed from source on Windows; if it fails,
+# the baseline falls back to a scikit-learn LogisticRegression+hashing trick.
+fasttext-wheel==0.9.2
+
+# Visualisation
+matplotlib==3.9.0
+seaborn==0.13.2
+pyvis==0.3.2
+
+# App + utils
+streamlit==1.36.0
+requests==2.32.3
+PyYAML==6.0.1
+omegaconf==2.3.0
+tqdm==4.66.4
+
+# Optional notebook tooling
+jupyter==1.0.0
+ipykernel==6.29.5
+
+# OPTIONAL: stronger text encoder for the EKNet pipeline. Only needed
+# when `text_encoder.type: minilm` (or `--profile accuracy`) is used.
+# Pulls in transformers + tokenizers; the MiniLM-L6 weights are ~80 MB.
+#
+# IMPORTANT pinning for torch==2.3.1 (which the rest of the stack
+# requires):
+#   - sentence-transformers 3.x and transformers >=4.50 demand torch>=2.4
+#     and will crash mid-import with "NameError: name 'nn' is not defined"
+#     because they auto-disable torch when it's < 2.4 but still reference
+#     nn.Module in a type annotation.
+#   - huggingface_hub >=0.24 removed symbols that transformers 4.39 imports.
+# The pins below give a known-good combination on Python 3.12 + torch 2.3.1.
+#
+# Uncomment all four lines to enable the MiniLM text encoder:
+# sentence-transformers==2.7.0
+# transformers>=4.39,<4.45
+# huggingface_hub<0.24
+# tokenizers>=0.15,<0.20
