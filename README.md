@@ -39,24 +39,55 @@ of EKNet intact:
 
 ## Datasets
 
-Primary (used in paper, Sec. V-A-3):
-* **Real or Fake** (Kaggle, `rchitic17/real-or-fake`) — 6 060 articles,
-  balanced 50/50. Schema: `id, title, text, label`.
+We use two English news-credibility datasets from Kaggle. Both are
+free to download with a Kaggle account.
 
-Secondary held-out (used in paper, Sec. V-A-4):
-* **Fake News Detection** (Kaggle, `jruvika/fake-news-detection`) —
-  3 988 articles. Schema: `URLs, Headline, Body, Label`.
+### 1. Primary corpus — *Real or Fake* (used for paper Table III)
+
+* **Kaggle slug**: `rchitic17/real-or-fake`
+* **Link**: <https://www.kaggle.com/datasets/rchitic17/real-or-fake>
+* **Size**: 6 335 articles, balanced 50 / 50 (REAL / FAKE)
+* **Schema**: `id, title, text, label`
+* **Used for**: training + test split for all EKNet ablations and
+  baselines reported in `reports/table1_detection.md` and
+  `reports/table3_ablation.md`.
+
+### 2. Held-out corpus — *Fake News Detection* (paper Sec. V-A-4)
+
+* **Kaggle slug**: `jruvika/fake-news-detection`
+* **Link**: <https://www.kaggle.com/datasets/jruvika/fake-news-detection>
+* **Size**: 4 009 articles
+* **Schema**: `URLs, Headline, Body, Label` (1 = real, 0 = fake)
+* **Used for**: domain-shift / generalisation check (the model is
+  trained on Real-or-Fake and evaluated cold on this dataset).
+
+### Downloading
 
 ```bash
-# requires `kaggle` CLI configured with API key
+# requires the `kaggle` CLI configured with an API token; see
+# https://www.kaggle.com/docs/api for setup
 python scripts/download_data.py
 ```
 
-If you cannot use the Kaggle CLI, manually drop the CSVs at:
+If you don't have the Kaggle CLI, download both CSVs from the links
+above and drop them as:
+
 ```
 data/raw/real_or_fake/fake_or_real_news.csv
 data/raw/fake_news_detection/data.csv
 ```
+
+### Why these two
+
+Both are short-text, English, balanced-ish, and contain real-world
+news mentions (people, places, organisations) — which is exactly what
+the EKNet pipeline needs to populate its Wikidata-backed entity
+ontology. They're also small enough to train end-to-end on a laptop
+CPU, matching the *CPU-friendly* constraint of this reimplementation.
+The original paper uses a Chinese Weibo rumor dataset; we substitute
+these English ones since we swap Baidupedia for Wikidata. See
+`reports/REPORT.md` ("Differences from the paper") for the full
+discussion.
 
 ---
 
@@ -204,6 +235,42 @@ streamlit run app/streamlit_app.py
 
 Paste an article → see real/fake verdict, highlighted entities, the
 generated comment, and an interactive entity-relation graph.
+
+---
+
+## Big Data Analytics layer (paper title's "Big Data-Driven" claim)
+
+The paper is explicitly framed as a *Big Data-Driven* approach
+(Liu et al., 2024). `src/bda/` makes that story concrete by applying
+four canonical streaming / sub-linear / probabilistic algorithms to our
+corpus. Everything runs on CPU in seconds and uses pure Python
+(no PySpark, Dask, or Flink required) but the algorithms port
+unchanged to a cluster on a 6 M-article corpus.
+
+| Technique | Where in the code | What it does |
+|---|---|---|
+| Count-Min Sketch | `src/bda/sketches.py::CountMinSketch` | Sub-linear-memory streaming heavy hitters for tokens and Wikidata-linked entities. Standard Cormode-Muthukrishnan sketch with `width=4096, depth=6` (~192 KB total state). |
+| Bloom Filter | `src/bda/sketches.py::BloomFilter` | Constant-time membership test on the local KG's QID set. Reports compression ratio vs. a naive `set[str]`. |
+| MinHash + LSH | `src/bda/dedup.py::find_near_duplicates` | Near-duplicate article detection. Uses `datasketch` if installed, falls back to a pure-Python MinHash + banded LSH otherwise. Detects wire-service reprints and label-leaking duplicates between splits. |
+| MapReduce framing | `src/kg/build_article_kg.py` (already in pipeline) | The per-article KG step is a textbook Map (`emit (h,r,t) triples`) → Shuffle → Reduce (`global KG`) → Embed (mini-batch TransE) job. The BDA report calls this out explicitly. |
+
+Run the whole BDA report:
+
+```bash
+python -m src.bda.corpus_analytics
+```
+
+This writes `reports/bda_corpus_stats.md` with corpus statistics,
+sketch heavy-hitters vs. exact counts, Bloom-filter compression vs.
+naive `set`, and the near-duplicate clusters discovered. The figures
+land in `reports/figures/bda_zipf.png` and
+`reports/figures/bda_label_balance.png`.
+
+Optional speed-up (drops dedup time ~5x on the full corpus):
+
+```bash
+pip install datasketch==1.6.5
+```
 
 ---
 

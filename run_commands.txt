@@ -6,7 +6,7 @@ python -m nltk.downloader wordnet omw-1.4 punkt
 python scripts/download_data.py
 python scripts/download_glove.py
 # python -m src.entity_linking.kb_cache --warm 
-python -m src.entity_linking.kb_cache --warm --primary-only --max-mentions 5000 --max-articles 2000 --rate-limit-s 1.0
+python -m src.entity_linking.kb_cache --warm --primary-only --max-mentions 5050 --max-articles 2000 --rate-limit-s 0.25
 python -m src.ontology.build_schema
 
 python -m src.train --model eknet --mode text_only

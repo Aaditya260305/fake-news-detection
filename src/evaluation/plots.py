@@ -34,20 +34,44 @@ def plot_f1_curves(history_files: Mapping[str, str | Path], out_path: str | Path
     plt.close(fig)
 
 
-def table_markdown(rows: Iterable[Mapping], cols: list[str], title: str | None = None) -> str:
-    header = "| " + " | ".join(cols) + " |"
-    sep = "|" + "|".join(["---"] * len(cols)) + "|"
-    lines = []
-    if title:
-        lines.append(f"### {title}\n")
-    lines.append(header)
-    lines.append(sep)
+def table_markdown(
+    rows: Iterable[Mapping],
+    cols: list[str],
+    title: str | None = None,
+    *,
+    float_fmt: str = "{:.3f}",
+) -> str:
+    """Render ``rows`` as a GitHub-flavoured markdown table.
+
+    Floats are formatted with ``float_fmt`` and every cell is padded to
+    the column width so the raw markdown is human-readable. Padding also
+    prevents editors from auto-collapsing columns when two cells differ
+    wildly in width.
+    """
+    rendered: list[list[str]] = []
     for r in rows:
-        cells = []
+        row_cells: list[str] = []
         for c in cols:
             v = r.get(c, "")
             if isinstance(v, float):
-                v = f"{v:.3f}"
-            cells.append(str(v))
-        lines.append("| " + " | ".join(cells) + " |")
+                v = float_fmt.format(v)
+            row_cells.append(str(v))
+        rendered.append(row_cells)
+
+    # column widths
+    widths = [max(len(str(c)), *(len(row[i]) for row in rendered) if rendered else (0,))
+              for i, c in enumerate(cols)]
+
+    def _pad(cells: list[str]) -> str:
+        return "| " + " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells)) + " |"
+
+    sep = "|" + "|".join("-" * (w + 2) for w in widths) + "|"
+
+    lines: list[str] = []
+    if title:
+        lines.append(f"### {title}\n")
+    lines.append(_pad(list(cols)))
+    lines.append(sep)
+    for row_cells in rendered:
+        lines.append(_pad(row_cells))
     return "\n".join(lines)

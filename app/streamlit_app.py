@@ -54,12 +54,66 @@ st.set_page_config(page_title="EKNet -- News Credibility", layout="wide")
 
 
 # ----------------------------------------------------------------------
+#  sidebar: entity-linking mode toggle
+# ----------------------------------------------------------------------
+
+def _render_sidebar() -> None:
+    with st.sidebar:
+        st.markdown("### Entity linking")
+        live = st.toggle(
+            "Live Wikidata lookup",
+            value=st.session_state.get("live_wikidata", True),
+            key="live_wikidata",
+            help=(
+                "ON  -- for entities not in the local KB cache, fetch them "
+                "live from Wikidata (slower, more accurate, results are "
+                "persisted to the cache for next time).\n\n"
+                "OFF -- offline mode: only use the warmed JSONL cache, "
+                "same as training. Faster but unknown entities won't be "
+                "resolved."
+            ),
+        )
+        if live:
+            st.caption("Unknown mentions will be fetched from Wikidata "
+                       "(~0.25s/mention, results cached).")
+        else:
+            st.caption("Offline: only the warmed KB cache is consulted.")
+
+
+_render_sidebar()
+
+
+# ----------------------------------------------------------------------
+#  small UI helper -- show per-request entity-linking stats
+# ----------------------------------------------------------------------
+
+def _render_linker_stats(linker: WikidataLinker) -> None:
+    s = linker.stats()
+    total = s["cache_hits"] + s["live_resolved"] + s["live_unresolved"] + s["live_failed"] + s["offline_miss"]
+    if total == 0:
+        return
+    parts = [f"{s['cache_hits']} from cache"]
+    if s["live_resolved"]:
+        parts.append(f"{s['live_resolved']} fetched live")
+    if s["live_unresolved"]:
+        parts.append(f"{s['live_unresolved']} not on Wikidata")
+    if s["live_failed"]:
+        parts.append(f"{s['live_failed']} live errors")
+    if s["offline_miss"]:
+        parts.append(f"{s['offline_miss']} skipped (offline)")
+    mode = "offline" if s["offline_only"] else "live"
+    st.caption(f"Entity linking ({mode}): " + ", ".join(parts) + ".")
+
+
+# ----------------------------------------------------------------------
 #  cached resource loaders
 # ----------------------------------------------------------------------
 
 @st.cache_resource
-def _load_core():
-    """Encoders + linker that are shared across every tab."""
+def _load_heavy():
+    """Load the things that are slow to construct (encoders + the
+    in-memory KB cache). The Wikidata linker is *not* cached because
+    we rebuild it per request to honour the live/offline toggle."""
     cfg = load_config()
     glove = GloveLoader(cfg.paths.glove, dim=cfg.text_encoder.glove_dim)
 
@@ -84,12 +138,47 @@ def _load_core():
     kg_enc = KGEncoder(kg_emb)
 
     cache = KBCache(cfg.paths.kb_cache)
-    linker = WikidataLinker(
+    return cfg, text_enc, kg_enc, cache
+
+
+def _build_linker(cfg, cache, *, live: bool) -> WikidataLinker:
+    """Construct a per-request linker.
+
+    Live demo mode uses an aggressive timeout/retry profile so the user
+    never waits more than ~2-3 seconds for entity resolution even on a
+    flaky Wikidata day. Offline mode is identical to training: cache
+    hits only, never touches the network.
+    """
+    if live:
+        return WikidataLinker(
+            cache,
+            endpoint=cfg.entity_linking.wikidata_endpoint,
+            user_agent=cfg.entity_linking.wikidata_user_agent,
+            top_relations=cfg.entity_linking.top_relations,
+            rate_limit_s=0.25,    # fast for interactive use
+            max_retries=1,        # don't hang the UI on 429s
+            timeout_s=4.0,
+            offline_only=False,
+        )
+    return WikidataLinker(
         cache,
         endpoint=cfg.entity_linking.wikidata_endpoint,
         user_agent=cfg.entity_linking.wikidata_user_agent,
         top_relations=cfg.entity_linking.top_relations,
+        offline_only=True,
     )
+
+
+def _load_core():
+    """Compatibility shim: returns (cfg, text_enc, kg_enc, linker).
+
+    Reads the global ``st.session_state['live_wikidata']`` flag set by
+    the sidebar widget; defaults to live=True so the demo behaves the
+    way most users expect.
+    """
+    cfg, text_enc, kg_enc, cache = _load_heavy()
+    live = bool(st.session_state.get("live_wikidata", True))
+    linker = _build_linker(cfg, cache, live=live)
     return cfg, text_enc, kg_enc, linker
 
 
@@ -178,6 +267,17 @@ def _list_available_models() -> dict[str, bool]:
 #  inference helpers
 # ----------------------------------------------------------------------
 
+#: Only these spaCy NER labels are meaningful to look up in Wikidata.
+#: DATE / TIME / MONEY / PERCENT / ORDINAL / CARDINAL / QUANTITY / NORP
+#: routinely match unrelated articles ("13" -> a 2010 film,
+#: "20 feet" -> a documentary, "today" -> an album, "American" -> a
+#: language), inject noise into the KG view, and corrupt the verdict.
+_KG_ENTITY_LABELS = {
+    "PERSON", "ORG", "GPE", "LOC", "FAC",
+    "EVENT", "PRODUCT", "WORK_OF_ART", "LAW",
+}
+
+
 def _encode_article_inputs(text: str, cfg, text_enc: TextEncoder, kg_enc: KGEncoder,
                            linker: WikidataLinker):
     """Tokenise + extract entities + build (text_vec, kg_vec, entity_rows)."""
@@ -193,7 +293,19 @@ def _encode_article_inputs(text: str, cfg, text_enc: TextEncoder, kg_enc: KGEnco
     qids: list[str] = []
     ent_rows = []
     for m in mentions[: cfg.entity_linking.max_entities_per_article]:
-        ent = linker.link(m.text)
+        # Only attempt to link real named entities; skip numeric /
+        # temporal / demonym spans that Wikidata search cannot resolve
+        # meaningfully.
+        if m.label not in _KG_ENTITY_LABELS:
+            ent_rows.append({
+                "mention": m.text,
+                "type": m.label,
+                "qid": "",
+                "label": "(skipped: non-KG entity type)",
+                "description": "",
+            })
+            continue
+        ent = linker.link(m.text, ner_label=m.label)
         if ent.qid:
             qids.append(ent.qid)
         ent_rows.append({
@@ -280,8 +392,32 @@ def tab_assess() -> None:
         st.error("No trained EKNet checkpoint found. Run `python -m src.train --model eknet --mode both` first.")
         return
 
-    mode = st.selectbox("EKNet ablation", eknet_modes, index=0,
-                        help="Pick which trained EKNet variant to use for the verdict.")
+    mode_labels = {
+        "both": "both  -- Text + Entity-Ontology  (recommended)",
+        "text_only": "text_only  -- ablation: text features only",
+        "ontology_only": "ontology_only  -- ablation: KG features only (weakest)",
+    }
+    mode = st.selectbox(
+        "EKNet ablation",
+        eknet_modes,
+        index=0,
+        format_func=lambda m: mode_labels.get(m, m),
+        help=(
+            "**both** uses both views and matches the paper's main result "
+            "(F1 ~0.86 on our training run, paper reports 99%).\n\n"
+            "**text_only** and **ontology_only** are paper-faithful "
+            "ablations -- useful for reproducing Table III but each is "
+            "missing half the signal, so individual verdicts can flip. "
+            "Use **both** for any real-world prediction."
+        ),
+    )
+    if mode != "both":
+        st.info(
+            f"You picked the **{mode}** ablation. It deliberately ignores "
+            f"half of the model and is meant for reproducing Table III "
+            f"(F1 ~{ '0.86' if mode == 'text_only' else '0.81' }), not for "
+            f"production verdicts. Switch to **both** for the best result."
+        )
     text = st.text_area("Paste a news article:", height=280, placeholder="Article text ...",
                         key="assess_text")
     if not text.strip():
@@ -291,7 +427,13 @@ def tab_assess() -> None:
     if not st.button("Assess credibility", key="assess_btn"):
         return
 
-    with st.spinner("Running entity linking + EKNet ..."):
+    linker.reset_stats()
+    spinner_msg = (
+        "Running entity linking (live Wikidata) + EKNet ..."
+        if not linker.offline_only
+        else "Running entity linking (offline cache) + EKNet ..."
+    )
+    with st.spinner(spinner_msg):
         tv, kv, ent_rows = _encode_article_inputs(text, cfg, text_enc, kg_enc, linker)
         model = _load_eknet(mode)
         prob = _predict_eknet(model, tv, kv) if model is not None else None
@@ -301,12 +443,37 @@ def tab_assess() -> None:
             top_keywords=cfg.comment_generator.top_keywords,
         )
 
+    # Out-of-distribution guard: the classifier was trained on real news
+    # articles (hundreds-to-thousands of tokens with several named
+    # entities). A short snippet with no resolvable entities falls in
+    # the "rant-style fake" region of feature space and the verdict is
+    # unreliable -- warn the viewer up front so they don't read it as a
+    # fact-check.
+    n_tokens = len(text.split())
+    resolved_entities = sum(1 for r in (ent_rows or []) if r.get("qid"))
+    ood_msgs = []
+    if n_tokens < 50:
+        ood_msgs.append(f"input is very short ({n_tokens} tokens; "
+                        f"training articles average ~400)")
+    if resolved_entities == 0:
+        ood_msgs.append("no named entities were resolved against the KG, "
+                        "so the ontology view is empty")
+    if ood_msgs:
+        st.warning(
+            "**Heads up -- this prediction is unreliable.** "
+            + " ".join(m.capitalize() + "." for m in ood_msgs)
+            + " EKNet is a news-style classifier trained on full articles, "
+            "not a general fact-checker. Try pasting a complete news story "
+            "(~300+ words with people, places, dates) for a meaningful verdict."
+        )
+
     col_v, col_c = st.columns([1, 2])
     with col_v:
         st.metric("Verdict", verdict)
         if prob is not None:
             st.progress(min(max(prob, 0.0), 1.0), text=f"Fake probability: {prob:.2%}")
         st.caption(f"Model: EKNet ({mode})")
+        _render_linker_stats(linker)
     with col_c:
         st.markdown("**Generated comment**")
         st.write(comment.text)
@@ -464,7 +631,10 @@ def tab_metrics() -> None:
         cm_cols = st.columns(min(3, len(df)))
         for i, row in df.iterrows():
             cm = row.get("confusion_matrix")
-            if not cm or len(cm) != 4:
+            # Reports loaded from heterogeneous JSON files can yield NaN
+            # (when a row is missing the field) or a stray scalar -- only
+            # accept a 4-element list/tuple.
+            if not isinstance(cm, (list, tuple)) or len(cm) != 4:
                 continue
             tn, fp, fn, tp = cm
             cm_df = pd.DataFrame(
@@ -482,14 +652,28 @@ def tab_metrics() -> None:
         st.markdown("### Validation-loss curves")
         loss_rows = []
         for name, hist in histories.items():
+            if not isinstance(hist, list):
+                continue
             for h in hist:
-                if "val_loss" in h and "epoch" in h:
-                    loss_rows.append({"model": name, "epoch": int(h["epoch"]),
-                                      "val_loss": float(h["val_loss"])})
+                if not isinstance(h, dict):
+                    continue
+                if "val_loss" not in h or "epoch" not in h:
+                    continue
+                try:
+                    loss_rows.append({
+                        "model": name,
+                        "epoch": int(h["epoch"]),
+                        "val_loss": float(h["val_loss"]),
+                    })
+                except (TypeError, ValueError):
+                    continue
         if loss_rows:
             ldf = pd.DataFrame(loss_rows)
-            pivot = ldf.pivot(index="epoch", columns="model", values="val_loss")
-            st.line_chart(pivot, height=320)
+            try:
+                pivot = ldf.pivot(index="epoch", columns="model", values="val_loss")
+                st.line_chart(pivot, height=320)
+            except Exception as e:
+                st.caption(f"(could not render val-loss chart: {e})")
 
 
 # ----------------------------------------------------------------------

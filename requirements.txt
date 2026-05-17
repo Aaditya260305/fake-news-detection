@@ -45,6 +45,11 @@ tqdm==4.66.4
 jupyter==1.0.0
 ipykernel==6.29.5
 
+# OPTIONAL: faster vectorised MinHash for the BDA near-duplicate
+# detection (`python -m src.bda.corpus_analytics`). Without it we fall
+# back to a pure-Python MinHash that's correct but ~5x slower.
+# datasketch==1.6.5
+
 # OPTIONAL: stronger text encoder for the EKNet pipeline. Only needed
 # when `text_encoder.type: minilm` (or `--profile accuracy`) is used.
 # Pulls in transformers + tokenizers; the MiniLM-L6 weights are ~80 MB.
